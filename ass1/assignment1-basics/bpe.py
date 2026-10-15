@@ -1,5 +1,8 @@
+import json
 import os
 from collections import Counter
+from collections.abc import Iterable, Iterator
+
 import regex
 
 
@@ -110,12 +113,27 @@ class BPE:
             if token_bytes not in self.vocab.values():
                 self.vocab[len(self.vocab)] = token_bytes
 
+        self._refresh_indexes()
+
+    def _refresh_indexes(self) -> None:
         self.token_to_id = {token: token_id for token_id, token in self.vocab.items()}
         self.merge_rank = {pair: rank for rank, pair in enumerate(self.merges)}
         self.special_to_id = {
             token: self.token_to_id[token.encode("utf-8")]
             for token in self.special_tokens
         }
+
+    def train(
+        self,
+        input_path: str | os.PathLike,
+        vocab_size: int,
+        special_tokens: list[str] | None = None,
+    ) -> None:
+        if special_tokens is not None:
+            self.special_tokens = list(special_tokens)
+
+        self.vocab, self.merges = train_bpe(input_path, vocab_size, self.special_tokens)
+        self._refresh_indexes()
 
     def _encode_pretoken(self, text: str) -> list[int]:
         pieces = [bytes([value]) for value in text.encode("utf-8")]
@@ -156,6 +174,54 @@ class BPE:
 
         return ids
 
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        buffer = ""
+        longest_special = max((len(token) for token in self.special_tokens), default=1)
+
+        if self.special_tokens:
+            ordered_tokens = sorted(self.special_tokens, key=len, reverse=True)
+            specials = "|".join(regex.escape(token) for token in ordered_tokens)
+            stream_pattern = f"(?:{specials})|(?:{PAT})"
+        else:
+            stream_pattern = PAT
+
+        for chunk in iterable:
+            buffer += chunk
+
+            # 留下最后一个未结束的 pre-token，也留下可能构成特殊 token 的尾部。
+            safe_limit = len(buffer) - longest_special + 1
+            safe_end = 0
+            for match in regex.finditer(stream_pattern, buffer):
+                if match.start() <= safe_limit:
+                    safe_end = match.start()
+                else:
+                    break
+
+            if safe_end:
+                yield from self.encode(buffer[:safe_end])
+                buffer = buffer[safe_end:]
+
+        if buffer:
+            yield from self.encode(buffer)
+
     def decode(self, ids: list[int]) -> str:
         text_bytes = b"".join(self.vocab[token_id] for token_id in ids)
         return text_bytes.decode("utf-8", errors="replace")
+
+    def save(self, path_prefix: str | os.PathLike) -> None:
+        data = {
+            "vocab": [[token_id, token.hex()] for token_id, token in self.vocab.items()],
+            "merges": [[left.hex(), right.hex()] for left, right in self.merges],
+            "special_tokens": self.special_tokens,
+        }
+        with open(f"{path_prefix}.json", "w", encoding="utf-8", newline="") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+
+    def load(self, path_prefix: str | os.PathLike) -> None:
+        with open(f"{path_prefix}.json", encoding="utf-8") as file:
+            data = json.load(file)
+
+        self.vocab = {int(token_id): bytes.fromhex(token) for token_id, token in data["vocab"]}
+        self.merges = [(bytes.fromhex(left), bytes.fromhex(right)) for left, right in data["merges"]]
+        self.special_tokens = list(data["special_tokens"])
+        self._refresh_indexes()

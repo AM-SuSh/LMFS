@@ -121,13 +121,15 @@ assignment1-basics/
 
 | 阶段 | 实现                                      | 涉及文件                                   | 远端验收                             |
 | ---- | ----------------------------------------- | ------------------------------------------ | ------------------------------------ |
-| B1   | 理解 bytes、预分词和特殊 token 边界       | 创建 `bpe.py`；必要时加一个小示例          | 小文本切分与手算结果一致             |
-| B2   | 实现简单、容易理解的 BPE 训练             | 扩展 `bpe.py`；只接训练 adapter            | 合并顺序、频率和平局处理正确         |
+| B1   | bytes、预分词和特殊 token 边界            | 创建 `bpe.py`                              | 文本切分示例正常                     |
+| B2   | 简单的 BPE 训练                           | 扩展 `bpe.py`；对接训练 adapter            | 合并顺序、频率和平局处理正确         |
 | B3   | 实现 `encode`、`decode` 和特殊 token 识别 | 扩展 `bpe.py`；接 tokenizer adapter        | Unicode、空白、特殊 token 编解码正确 |
 | B4   | 保存加载、惰性流式编码                    | 继续完善 `bpe.py`                          | 重载前后结果一致，流式边界正确       |
 | B5   | 根据实际瓶颈优化                          | 只改已证明慢的部分                         | 正确性不变，实测性能改善             |
 | B6   | 接入网站 W&B 记录器和 BPE 入口            | 逐步添加 `wandb_record.py`、`train_bpe.py` | 小规模流程能产生完整审查记录         |
 | B7   | 服务器运行正式 OWT 实验                   | 使用已验证代码                             | 产生正式 BPE run 和分词器产物        |
+
+**B1**
 
 BPE输入表示：
 
@@ -138,3 +140,31 @@ BPE输入表示：
 3. 将每个 pre-token 编码为 UTF-8。
 
 4. 把 UTF-8 展开成单字节 `bytes` 元组，供下一步统计相邻 token 对。
+
+**B2**
+
+较长的特殊 token 优先，避免它被较短且重叠的 token 抢先匹配。
+
+1. 按 pre-token 出现频次累计所有相邻 pair。
+2. 选择频次最高的 pair。
+3. 同频时选择 `bytes` 元组字典序最大的 pair。
+4. 在每个 pre-token 内从左向右进行非重叠替换。
+5. 将合并结果加入词表，直到达到 `vocab_size`。
+
+```
+python -m pytest tests/test_train_bpe.py::test_train_bpe -q
+```
+
+**B3**
+
+编码一个普通 pre-token 时：
+
+1. UTF-8 编码并拆成单字节 token。
+2. 查看当前相邻 pair 是否存在于 merges。
+3. 选择 rank 最小，也就是训练时最早产生的 merge。
+4. 合并它的全部非重叠出现位置。
+5. 重复直到没有可用 merge，再转换成 ID。
+
+特殊 token 会先从普通文本中分离。存在重叠时优先匹配长 token，例如连续两个 `<|endoftext|>` 可作为一个双长度特殊 token。
+
+解码不能逐 token 调用 UTF-8 解码，因为一个 Unicode 字符可能分散在多个 token 中。当前实现先拼接所有 bytes，再统一。
