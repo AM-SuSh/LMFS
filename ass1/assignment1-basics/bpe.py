@@ -79,8 +79,13 @@ def train_bpe(
     pretoken_counts = count_byte_pretokens(text, special_tokens)
     merges: list[Pair] = []
 
+    pair_counts = count_pairs(pretoken_counts)
+    pair_to_pretokens: dict[Pair, set[Pretoken]] = {}
+    for pretoken in pretoken_counts:
+        for pair in set(zip(pretoken, pretoken[1:])):
+            pair_to_pretokens.setdefault(pair, set()).add(pretoken)
+
     while len(vocab) < vocab_size:
-        pair_counts = count_pairs(pretoken_counts)
         if not pair_counts:
             break
 
@@ -89,10 +94,32 @@ def train_bpe(
         merges.append(best_pair)
         vocab[len(vocab)] = best_pair[0] + best_pair[1]
 
-        updated_counts: Counter[Pretoken] = Counter()
-        for pretoken, frequency in pretoken_counts.items():
-            updated_counts[merge_pair(pretoken, best_pair)] += frequency
-        pretoken_counts = updated_counts
+        changed_pretokens: Counter[Pretoken] = Counter()
+        affected = list(pair_to_pretokens[best_pair])
+
+        for pretoken in affected:
+            frequency = pretoken_counts.pop(pretoken)
+            old_pairs = Counter(zip(pretoken, pretoken[1:]))
+
+            for pair, count in old_pairs.items():
+                pair_counts[pair] -= count * frequency
+                pair_to_pretokens[pair].discard(pretoken)
+
+                if pair_counts[pair] == 0:
+                    del pair_counts[pair]
+                if not pair_to_pretokens[pair]:
+                    del pair_to_pretokens[pair]
+
+            new_pretoken = merge_pair(pretoken, best_pair)
+            changed_pretokens[new_pretoken] += frequency
+
+        for pretoken, frequency in changed_pretokens.items():
+            pretoken_counts[pretoken] += frequency
+            new_pairs = Counter(zip(pretoken, pretoken[1:]))
+
+            for pair, count in new_pairs.items():
+                pair_counts[pair] += count * frequency
+                pair_to_pretokens.setdefault(pair, set()).add(pretoken)
 
     return vocab, merges
 
